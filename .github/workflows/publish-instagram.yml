@@ -35,13 +35,18 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          command -v convert || command -v magick
-          if command -v magick >/dev/null 2>&1; then
-            magick media/mahi-intro.jpg -auto-orient -strip -quality 92 media/mahi-intro-instagram.jpg
-          else
-            convert media/mahi-intro.jpg -auto-orient -strip -quality 92 media/mahi-intro-instagram.jpg
-          fi
-          identify media/mahi-intro-instagram.jpg
+          python -m pip install --disable-pip-version-check -q pillow
+          python - <<'PY'
+          from PIL import Image
+          src="media/mahi-intro.jpg"
+          dst="media/mahi-intro-instagram.jpg"
+          with Image.open(src) as im:
+              print("Decoded:", im.format, im.size, im.mode)
+              rgb=im.convert("RGB")
+              rgb.save(dst, format="JPEG", quality=92, optimize=True)
+          with Image.open(dst) as out:
+              print("Re-encoded:", out.format, out.size, out.mode)
+          PY
 
           git add media/mahi-intro.jpg media/mahi-intro-instagram.jpg
           if ! git diff --cached --quiet; then
