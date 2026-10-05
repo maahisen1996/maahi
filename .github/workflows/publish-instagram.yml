@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          RESPONSE=$(curl -G -sS "https://graph.facebook.com/v25.0/me/accounts"             --data-urlencode "fields=id,name,access_token,instagram_business_account"             --data-urlencode "access_token=$USER_TOKEN")
+          RESPONSE=$(curl -G -sS "https://graph.facebook.com/v25.0/me/accounts"             --data-urlencode "fields=id,name,access_token,instagram_business_account"             -H "Authorization: Bearer $USER_TOKEN")
 
           echo "$RESPONSE"
 
