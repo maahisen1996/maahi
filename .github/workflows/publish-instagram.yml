@@ -1,6 +1,9 @@
 name: Publish Mahi Instagram
 
 on:
+  push:
+    paths:
+      - ".github/workflows/publish-instagram.yml"
   workflow_dispatch:
 
 permissions:
