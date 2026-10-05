@@ -38,6 +38,15 @@ function randInt(min, max) {
   return min + (a[0] % (max - min + 1));
 }
 
+async function recordEvent(env, key, payload) {
+  try {
+    await env.MAAHI_STATE.put(key, JSON.stringify({
+      at: new Date().toISOString(),
+      ...payload,
+    }), { expirationTtl: 604800 });
+  } catch (_) {}
+}
+
 async function gh(path) {
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${path}?ref=${GITHUB_BRANCH}`;
   const r = await fetch(url, {
@@ -92,7 +101,10 @@ async function alreadyOnInstagram(env, caption) {
   const r = await fetch(u, {
     headers: { authorization: `Bearer ${env.INSTAGRAM_ACCESS}` },
   });
-  if (!r.ok) return null;
+  if (!r.ok) {
+    const body = await r.text();
+    throw new Error(`Instagram media lookup ${r.status}: ${body}`);
+  }
   const data = await r.json();
   const found = (data.data || []).find((x) => (x.caption || "").trim() === caption.trim());
   return found?.id || null;
@@ -112,52 +124,77 @@ async function igPost(url, body, env) {
 }
 
 async function publishStem(stem, env) {
-  const queue = await listQueue();
-  const item = queue.find((x) => x.stem === stem || x.stem.startsWith(`${stem}_`));
-  if (!item) throw new Error(`Queue item not found: ${stem}`);
-  stem = item.stem;
-
-  const done = await env.MAAHI_STATE.get(`posted:${stem}`);
-  if (done) return { ok: true, skipped: "already-marked", stem, media_id: done };
-
-  const caption = await getCaption(item);
-  const existing = await alreadyOnInstagram(env, caption);
-  if (existing) {
-    await env.MAAHI_STATE.put(`posted:${stem}`, existing);
-    return { ok: true, skipped: "already-on-instagram", stem, media_id: existing };
-  }
-
-  const leaseKey = `lease:${stem}`;
-  const lease = await env.MAAHI_STATE.get(leaseKey);
-  if (lease) return { ok: false, skipped: "lease-active", stem };
-  await env.MAAHI_STATE.put(leaseKey, String(Date.now()), { expirationTtl: 900 });
-
+  let phase = "start";
   try {
-    const imageUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/image/${encodeURIComponent(stem)}`;
-    const container = await igPost(`${GRAPH_BASE}/${env.IG_USER_ID}/media`, {
-      image_url: imageUrl,
-      caption,
-    }, env);
+    phase = "list-queue";
+    const queue = await listQueue();
+    const item = queue.find((x) => x.stem === stem || x.stem.startsWith(`${stem}_`));
+    if (!item) throw new Error(`Queue item not found: ${stem}`);
+    stem = item.stem;
 
-    for (let i = 0; i < 18; i++) {
-      const u = new URL(`${GRAPH_BASE}/${container.id}`);
-      u.searchParams.set("fields", "status_code,status");
-      const r = await fetch(u, { headers: { authorization: `Bearer ${env.INSTAGRAM_ACCESS}` } });
-      const data = await r.json();
-      if (data.status_code === "FINISHED") break;
-      if (["ERROR", "EXPIRED"].includes(data.status_code)) throw new Error(`Instagram processing ${data.status_code}`);
-      if (i === 17) throw new Error("Instagram processing timed out");
-      await new Promise((resolve) => setTimeout(resolve, 10000));
+    phase = "check-posted";
+    const done = await env.MAAHI_STATE.get(`posted:${stem}`);
+    if (done) return { ok: true, skipped: "already-marked", stem, media_id: done };
+
+    phase = "caption";
+    const caption = await getCaption(item);
+
+    phase = "instagram-duplicate-check";
+    const existing = await alreadyOnInstagram(env, caption);
+    if (existing) {
+      await env.MAAHI_STATE.put(`posted:${stem}`, existing);
+      await recordEvent(env, "last_success", { stem, phase: "already-on-instagram", media_id: existing });
+      return { ok: true, skipped: "already-on-instagram", stem, media_id: existing };
     }
 
-    const published = await igPost(`${GRAPH_BASE}/${env.IG_USER_ID}/media_publish`, {
-      creation_id: container.id,
-    }, env);
-    await env.MAAHI_STATE.put(`posted:${stem}`, published.id);
-    await env.MAAHI_STATE.delete(leaseKey);
-    return { ok: true, stem, media_id: published.id };
+    const leaseKey = `lease:${stem}`;
+    phase = "lease";
+    const lease = await env.MAAHI_STATE.get(leaseKey);
+    if (lease) return { ok: false, skipped: "lease-active", stem };
+    await env.MAAHI_STATE.put(leaseKey, String(Date.now()), { expirationTtl: 900 });
+
+    try {
+      phase = "create-container";
+      const imageUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/image/${encodeURIComponent(stem)}`;
+      const container = await igPost(`${GRAPH_BASE}/${env.IG_USER_ID}/media`, {
+        image_url: imageUrl,
+        caption,
+      }, env);
+
+      phase = "wait-processing";
+      for (let i = 0; i < 18; i++) {
+        const u = new URL(`${GRAPH_BASE}/${container.id}`);
+        u.searchParams.set("fields", "status_code,status");
+        const r = await fetch(u, { headers: { authorization: `Bearer ${env.INSTAGRAM_ACCESS}` } });
+        const text = await r.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = {}; }
+        if (!r.ok) throw new Error(`Instagram processing lookup ${r.status}: ${text}`);
+        if (data.status_code === "FINISHED") break;
+        if (["ERROR", "EXPIRED"].includes(data.status_code)) throw new Error(`Instagram processing ${data.status_code}: ${text}`);
+        if (i === 17) throw new Error(`Instagram processing timed out: ${text}`);
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+      }
+
+      phase = "publish-container";
+      const published = await igPost(`${GRAPH_BASE}/${env.IG_USER_ID}/media_publish`, {
+        creation_id: container.id,
+      }, env);
+      await env.MAAHI_STATE.put(`posted:${stem}`, published.id);
+      await env.MAAHI_STATE.delete(leaseKey);
+      await recordEvent(env, "last_success", { stem, phase: "published", media_id: published.id });
+      await env.MAAHI_STATE.delete("last_error");
+      return { ok: true, stem, media_id: published.id };
+    } catch (e) {
+      await env.MAAHI_STATE.delete(leaseKey);
+      throw e;
+    }
   } catch (e) {
-    await env.MAAHI_STATE.delete(leaseKey);
+    await recordEvent(env, "last_error", {
+      stem,
+      phase,
+      message: String(e?.message || e),
+    });
     throw e;
   }
 }
@@ -186,6 +223,7 @@ async function ensureDailyPlan(env) {
 }
 
 async function scheduledRun(env) {
+  await recordEvent(env, "last_run", { phase: "scheduled-start" });
   const now = pacificParts();
   const plan = await ensureDailyPlan(env);
   const currentMinute = minutesOfDay(now.time);
@@ -205,14 +243,26 @@ async function scheduledRun(env) {
       slot.post_id = result.stem;
       await env.MAAHI_STATE.put(`plan:${now.date}`, JSON.stringify(plan), { expirationTtl: 172800 });
     }
+    await recordEvent(env, "last_run", { phase: "scheduled-finish", result });
     return result;
   }
-  return { ok: true, skipped: "nothing-due" };
+  const result = { ok: true, skipped: "nothing-due" };
+  await recordEvent(env, "last_run", { phase: "scheduled-finish", result });
+  return result;
 }
 
 export default {
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(scheduledRun(env));
+    ctx.waitUntil((async () => {
+      try {
+        await scheduledRun(env);
+      } catch (e) {
+        await recordEvent(env, "last_error", {
+          phase: "scheduled-handler",
+          message: String(e?.message || e),
+        });
+      }
+    })());
   },
 
   async fetch(request, env) {
