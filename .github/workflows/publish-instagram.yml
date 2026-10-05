@@ -1,15 +1,24 @@
-name: Publish Mahi Instagram
+name: Autonomous Mahi Instagram Queue
 
 on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      post_id:
+        description: "Optional queue post ID to publish immediately, e.g. 02"
+        required: false
+        type: string
   push:
     paths:
-      - ".github/workflows/publish-instagram.yml"
-      - "content.json"
-      - "media/mahi-intro.jpg"
-  workflow_dispatch:
+      - "queue/test-trigger.txt"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: instagram-autopost
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -17,34 +26,189 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Verify image
+      - name: Decide whether a post is due
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_POST_ID: ${{ github.event.inputs.post_id || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -f media/mahi-intro.jpg
-          test "$(stat -c%s media/mahi-intro.jpg)" -gt 10000
+          python - <<'PY'
+          import json, os, random
+          from datetime import datetime, timedelta
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
 
-      - name: Build public image URL
-        id: image
-        shell: bash
-        run: |
-          echo "image_url=https://raw.githubusercontent.com/maahisen1996/maahi/$GITHUB_SHA/media/mahi-intro.jpg" >> "$GITHUB_OUTPUT"
+          cfg = json.loads(Path("automation-config.json").read_text())
+          tz = ZoneInfo(cfg["timezone"])
+          now = datetime.now(tz)
+          today = now.date().isoformat()
 
-      - name: Read caption
-        id: content
-        shell: bash
-        run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          with open("content.json", encoding="utf-8") as f:
-              d=json.load(f)
-          print("caption<<EOF")
-          print(d["caption"])
-          print("EOF")
+          def posted_ids():
+              p = Path("state/posted.json")
+              if not p.exists():
+                  return set()
+              data = json.loads(p.read_text() or "[]")
+              if isinstance(data, list):
+                  if data and isinstance(data[0], dict):
+                      return {x.get("id") for x in data if x.get("id")}
+                  return set(data)
+              return {x.get("id") for x in data.get("posts", []) if x.get("id")}
+
+          captions = sorted(p for p in Path("queue").glob("*.txt") if p.name != "test-trigger.txt")
+          available = [p.stem for p in captions if p.stem not in posted_ids() and Path(f"queue/{p.stem}.jpg.b64").exists()]
+
+          event = os.environ.get("EVENT_NAME", "")
+          force = os.environ.get("MANUAL_POST_ID", "").strip()
+          if event == "push":
+              t = Path("queue/test-trigger.txt")
+              if t.exists():
+                  force = t.read_text().strip()
+          if force:
+              matches = [s for s in [p.stem for p in captions] if s == force or s.startswith(force + "_")]
+              stem = matches[0] if matches else ""
+              should = bool(stem and Path(f"queue/{stem}.jpg.b64").exists())
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write(f"should_post={'true' if should else 'false'}\n")
+                  out.write(f"stem={stem}\n")
+                  out.write("slot_index=\n")
+                  out.write("plan_changed=false\n")
+              raise SystemExit
+
+          plan_path = Path("state/plan.json")
+          try:
+              plan = json.loads(plan_path.read_text())
+          except Exception:
+              plan = {}
+
+          changed = False
+          if plan.get("date") != today:
+              probs = cfg["daily_post_probabilities"]
+              counts = [int(k) for k in probs]
+              weights = [float(probs[str(k)]) for k in counts]
+              count = random.choices(counts, weights=weights, k=1)[0]
+              count = min(count, len(cfg["windows"]))
+              slots = []
+              for i in range(count):
+                  w = cfg["windows"][i]
+                  sh, sm = map(int, w["start"].split(":"))
+                  eh, em = map(int, w["end"].split(":"))
+                  start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                  end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+                  minutes = int((end - start).total_seconds() // 60)
+                  pick = random.randint(0, max(minutes, 0))
+                  when = start + timedelta(minutes=pick)
+                  slots.append({"time": when.strftime("%H:%M"), "done": False, "post_id": None})
+              plan = {"date": today, "timezone": cfg["timezone"], "slots": slots}
+              plan_path.parent.mkdir(parents=True, exist_ok=True)
+              plan_path.write_text(json.dumps(plan, indent=2) + "\n")
+              changed = True
+
+          stem = ""
+          slot_index = ""
+          if available:
+              for i, slot in enumerate(plan.get("slots", [])):
+                  if slot.get("done"):
+                      continue
+                  hh, mm = map(int, slot["time"].split(":"))
+                  due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                  if now >= due:
+                      stem = available[0]
+                      slot_index = str(i)
+                      break
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"should_post={'true' if bool(stem) else 'false'}\n")
+              out.write(f"stem={stem}\n")
+              out.write(f"slot_index={slot_index}\n")
+              out.write(f"plan_changed={'true' if changed else 'false'}\n")
           PY
 
+      - name: Save today's randomized plan
+        if: steps.decide.outputs.plan_changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "maahi-autopost"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/plan.json
+          git commit -m "Plan today's Instagram posting times" || exit 0
+          git push
+
+      - name: Stop when nothing is due
+        if: steps.decide.outputs.should_post != 'true'
+        run: echo "No Instagram post is due on this run."
+
+      - name: Prepare public Instagram image
+        if: steps.decide.outputs.should_post == 'true'
+        id: image
+        env:
+          STEM: ${{ steps.decide.outputs.stem }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pillow
+          mkdir -p public
+          base64 --decode "queue/${STEM}.jpg.b64" > /tmp/source.jpg
+          STEM="$STEM" python - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          import os
+
+          stem = os.environ["STEM"]
+          im = Image.open('/tmp/source.jpg').convert('RGB')
+          w, h = im.size
+          target_ratio = 4/5
+          ratio = w/h
+          if ratio < target_ratio:
+              new_h = round(w / target_ratio)
+              top = max((h - new_h)//2, 0)
+              im = im.crop((0, top, w, top + new_h))
+          elif ratio > target_ratio:
+              new_w = round(h * target_ratio)
+              left = max((w - new_w)//2, 0)
+              im = im.crop((left, 0, left + new_w, h))
+          im = im.resize((1080, 1350), Image.Resampling.LANCZOS)
+          out = Path('public') / f'{stem}.jpg'
+          im.save(out, 'JPEG', quality=92, optimize=True)
+          PY
+
+          git config user.name "maahi-autopost"
+          git config user.email "actions@users.noreply.github.com"
+          git add "public/${STEM}.jpg"
+          if ! git diff --cached --quiet; then
+            git commit -m "Stage ${STEM} for Instagram publishing"
+            git push
+          fi
+
+          IMAGE_URL="https://raw.githubusercontent.com/maahisen1996/maahi/main/public/${STEM}.jpg"
+          for i in {1..12}; do
+            if curl -fsSI "$IMAGE_URL" >/dev/null; then break; fi
+            sleep 5
+          done
+          curl -fsSI "$IMAGE_URL" >/dev/null
+          echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Read caption
+        if: steps.decide.outputs.should_post == 'true'
+        id: content
+        env:
+          STEM: ${{ steps.decide.outputs.stem }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "caption<<EOF"
+            cat "queue/${STEM}.txt"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Identify Instagram account
+        if: steps.decide.outputs.should_post == 'true'
         id: account
         env:
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
@@ -52,12 +216,15 @@ jobs:
         run: |
           set -euo pipefail
           ACCESS_TOKEN=$(printf '%s' "$ACCESS_TOKEN" | tr -d '[:space:]')
-          RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/me"             --data-urlencode "fields=user_id,username,account_type"             -H "Authorization: Bearer $ACCESS_TOKEN")
+          RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/me" \
+            --data-urlencode "fields=user_id,username,account_type" \
+            -H "Authorization: Bearer $ACCESS_TOKEN")
           echo "$RESPONSE"
-          IG_USER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["user_id"])' <<< "$RESPONSE")
+          IG_USER_ID=$(python -c 'import json,sys; d=json.load(sys.stdin); assert "user_id" in d, d; print(d["user_id"])' <<< "$RESPONSE")
           echo "ig_user_id=$IG_USER_ID" >> "$GITHUB_OUTPUT"
 
       - name: Create Instagram media container
+        if: steps.decide.outputs.should_post == 'true'
         id: container
         env:
           IG_USER_ID: ${{ steps.account.outputs.ig_user_id }}
@@ -68,12 +235,17 @@ jobs:
         run: |
           set -euo pipefail
           ACCESS_TOKEN=$(printf '%s' "$ACCESS_TOKEN" | tr -d '[:space:]')
-          RESPONSE=$(curl -sS -X POST             "https://graph.instagram.com/v25.0/$IG_USER_ID/media"             -H "Authorization: Bearer $ACCESS_TOKEN"             --data-urlencode "image_url=$IMAGE_URL"             --data-urlencode "caption=$CAPTION")
+          RESPONSE=$(curl -sS -X POST \
+            "https://graph.instagram.com/v25.0/$IG_USER_ID/media" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            --data-urlencode "image_url=$IMAGE_URL" \
+            --data-urlencode "caption=$CAPTION")
           echo "$RESPONSE"
-          CONTAINER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$RESPONSE")
+          CONTAINER_ID=$(python -c 'import json,sys; d=json.load(sys.stdin); assert "id" in d, d; print(d["id"])' <<< "$RESPONSE")
           echo "container_id=$CONTAINER_ID" >> "$GITHUB_OUTPUT"
 
       - name: Wait for Instagram processing
+        if: steps.decide.outputs.should_post == 'true'
         env:
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           CONTAINER_ID: ${{ steps.container.outputs.container_id }}
@@ -82,14 +254,14 @@ jobs:
           set -euo pipefail
           ACCESS_TOKEN=$(printf '%s' "$ACCESS_TOKEN" | tr -d '[:space:]')
           for i in {1..18}; do
-            RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/$CONTAINER_ID"               --data-urlencode "fields=status_code,status"               -H "Authorization: Bearer $ACCESS_TOKEN")
+            RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/$CONTAINER_ID" \
+              --data-urlencode "fields=status_code,status" \
+              -H "Authorization: Bearer $ACCESS_TOKEN")
             echo "$RESPONSE"
             STATUS=$(python -c 'import json,sys; print(json.load(sys.stdin).get("status_code",""))' <<< "$RESPONSE")
             case "$STATUS" in
               FINISHED) exit 0 ;;
-              ERROR|EXPIRED)
-                echo "Instagram processing failed: $STATUS"
-                exit 1 ;;
+              ERROR|EXPIRED) echo "Instagram processing failed: $STATUS"; exit 1 ;;
             esac
             sleep 10
           done
@@ -97,6 +269,8 @@ jobs:
           exit 1
 
       - name: Publish to Instagram
+        if: steps.decide.outputs.should_post == 'true'
+        id: publish
         env:
           IG_USER_ID: ${{ steps.account.outputs.ig_user_id }}
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
@@ -105,5 +279,59 @@ jobs:
         run: |
           set -euo pipefail
           ACCESS_TOKEN=$(printf '%s' "$ACCESS_TOKEN" | tr -d '[:space:]')
-          RESPONSE=$(curl -sS -X POST             "https://graph.instagram.com/v25.0/$IG_USER_ID/media_publish"             -H "Authorization: Bearer $ACCESS_TOKEN"             --data-urlencode "creation_id=$CONTAINER_ID")
+          RESPONSE=$(curl -sS -X POST \
+            "https://graph.instagram.com/v25.0/$IG_USER_ID/media_publish" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            --data-urlencode "creation_id=$CONTAINER_ID")
           echo "$RESPONSE"
+          MEDIA_ID=$(python -c 'import json,sys; d=json.load(sys.stdin); assert "id" in d, d; print(d["id"])' <<< "$RESPONSE")
+          echo "media_id=$MEDIA_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Mark post complete
+        if: steps.decide.outputs.should_post == 'true' && steps.publish.outputs.media_id != ''
+        env:
+          STEM: ${{ steps.decide.outputs.stem }}
+          SLOT_INDEX: ${{ steps.decide.outputs.slot_index }}
+          MEDIA_ID: ${{ steps.publish.outputs.media_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STEM="$STEM" SLOT_INDEX="$SLOT_INDEX" MEDIA_ID="$MEDIA_ID" python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          p = Path('state/posted.json')
+          try:
+              data = json.loads(p.read_text())
+          except Exception:
+              data = []
+          if isinstance(data, dict):
+              data = data.get('posts', [])
+          if data and not isinstance(data[0], dict):
+              data = [{'id': x} for x in data]
+          stem = os.environ['STEM']
+          if not any(x.get('id') == stem for x in data):
+              data.append({
+                  'id': stem,
+                  'instagram_media_id': os.environ['MEDIA_ID'],
+                  'posted_at_utc': datetime.now(timezone.utc).isoformat()
+              })
+          p.write_text(json.dumps(data, indent=2) + '\n')
+
+          slot = os.environ.get('SLOT_INDEX', '')
+          if slot:
+              q = Path('state/plan.json')
+              plan = json.loads(q.read_text())
+              i = int(slot)
+              if i < len(plan.get('slots', [])):
+                  plan['slots'][i]['done'] = True
+                  plan['slots'][i]['post_id'] = stem
+                  q.write_text(json.dumps(plan, indent=2) + '\n')
+          PY
+
+          git config user.name "maahi-autopost"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/posted.json state/plan.json
+          git commit -m "Mark ${STEM} published to Instagram" || exit 0
+          git push
