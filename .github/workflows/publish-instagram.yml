@@ -45,6 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ACCESS_TOKEN=$(printf '%s' "$ACCESS_TOKEN" | tr -d '[:space:]')
           python - <<'PY'
           import os, re
           token=os.environ["ACCESS_TOKEN"]
