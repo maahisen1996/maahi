@@ -1,6 +1,10 @@
 name: Publish Mahi Instagram
 
 on:
+  push:
+    paths:
+      - ".github/workflows/publish-instagram.yml"
+      - "content.json"
   workflow_dispatch:
 
 permissions:
@@ -38,7 +42,7 @@ jobs:
       - name: Create Instagram media container
         id: container
         env:
-          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          IG_USER_ID: 17841424446542500
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           IMAGE_URL: ${{ steps.content.outputs.image_url }}
           CAPTION: ${{ steps.content.outputs.caption }}
@@ -82,7 +86,7 @@ jobs:
 
       - name: Publish to Instagram
         env:
-          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          IG_USER_ID: 17841424446542500
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           CONTAINER_ID: ${{ steps.container.outputs.container_id }}
         shell: bash
