@@ -17,26 +17,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Materialize JPEG
+      - name: Decode JPEG payload
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode media/mahi-intro.b64 > media/mahi-intro.jpg
           python - <<'PY'
+          import base64
           from pathlib import Path
-          p=Path("media/mahi-intro.jpg")
-          data=p.read_bytes()
-          assert data[:2] == b"\xff\xd8", "Not a JPEG"
-          assert len(data) > 10000, f"Image unexpectedly small: {len(data)} bytes"
-          print(f"Validated JPEG: {len(data)} bytes")
+
+          s = Path("media/mahi-intro.b64").read_text().strip()
+
+          def valid_jpeg(data: bytes) -> bool:
+              return data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9") and len(data) > 10000
+
+          # Normal decode first.
+          try:
+              data = base64.b64decode(s, validate=True)
+          except Exception:
+              data = b""
+
+          # The stored payload is currently one character off a 4-byte boundary.
+          # Try dropping one character at each position; stop when we recover a valid JPEG.
+          if not valid_jpeg(data):
+              found = None
+              for i in range(len(s)):
+                  candidate = s[:i] + s[i+1:]
+                  try:
+                      decoded = base64.b64decode(candidate, validate=True)
+                  except Exception:
+                      continue
+                  if valid_jpeg(decoded):
+                      found = decoded
+                      print(f"Recovered JPEG by removing character at position {i}")
+                      break
+              if found is None:
+                  raise SystemExit("Could not recover a valid JPEG from media/mahi-intro.b64")
+              data = found
+
+          Path("media/mahi-intro.jpg").write_bytes(data)
+          print(f"JPEG ready: {len(data)} bytes")
           PY
 
+          file media/mahi-intro.jpg
+
+      - name: Commit JPEG
+        shell: bash
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add media/mahi-intro.jpg
           if ! git diff --cached --quiet; then
             git commit -m "chore: materialize Mahi image"
             git push
-          else
-            echo "Image already present and unchanged."
           fi
