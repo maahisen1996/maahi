@@ -1,72 +1,92 @@
-name: Prepare Mahi Image
+name: Publish Mahi Instagram
 
 on:
-  push:
-    paths:
-      - "content.json"
-      - "media/mahi-intro.b64"
-      - ".github/workflows/publish-instagram.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  prepare:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - name: Decode JPEG payload
+      - name: Verify public image
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import base64
-          from pathlib import Path
-
-          s = Path("media/mahi-intro.b64").read_text().strip()
-
-          def valid_jpeg(data: bytes) -> bool:
-              return data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9") and len(data) > 10000
-
-          # Normal decode first.
-          try:
-              data = base64.b64decode(s, validate=True)
-          except Exception:
-              data = b""
-
-          # The stored payload is currently one character off a 4-byte boundary.
-          # Try dropping one character at each position; stop when we recover a valid JPEG.
-          if not valid_jpeg(data):
-              found = None
-              for i in range(len(s)):
-                  candidate = s[:i] + s[i+1:]
-                  try:
-                      decoded = base64.b64decode(candidate, validate=True)
-                  except Exception:
-                      continue
-                  if valid_jpeg(decoded):
-                      found = decoded
-                      print(f"Recovered JPEG by removing character at position {i}")
-                      break
-              if found is None:
-                  raise SystemExit("Could not recover a valid JPEG from media/mahi-intro.b64")
-              data = found
-
-          Path("media/mahi-intro.jpg").write_bytes(data)
-          print(f"JPEG ready: {len(data)} bytes")
-          PY
-
+          test -f media/mahi-intro.jpg
           file media/mahi-intro.jpg
+          curl -fsSLI "https://raw.githubusercontent.com/maahisen1996/maahi/main/media/mahi-intro.jpg" >/dev/null
 
-      - name: Commit JPEG
+      - name: Read post content
+        id: content
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add media/mahi-intro.jpg
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: materialize Mahi image"
-            git push
-          fi
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open("content.json", encoding="utf-8") as f:
+              d=json.load(f)
+          print("image_url="+d["image_url"])
+          print("caption<<EOF")
+          print(d["caption"])
+          print("EOF")
+          PY
+
+      - name: Create Instagram media container
+        id: container
+        env:
+          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          IMAGE_URL: ${{ steps.content.outputs.image_url }}
+          CAPTION: ${{ steps.content.outputs.caption }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$IG_USER_ID"
+          test -n "$ACCESS_TOKEN"
+
+          RESPONSE=$(curl --fail-with-body -sS -X POST             "https://graph.facebook.com/v24.0/$IG_USER_ID/media"             --data-urlencode "image_url=$IMAGE_URL"             --data-urlencode "caption=$CAPTION"             --data-urlencode "access_token=$ACCESS_TOKEN")
+
+          echo "$RESPONSE"
+          CONTAINER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$RESPONSE")
+          echo "container_id=$CONTAINER_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Instagram processing
+        env:
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          CONTAINER_ID: ${{ steps.container.outputs.container_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..18}; do
+            RESPONSE=$(curl --fail-with-body -sS               "https://graph.facebook.com/v24.0/$CONTAINER_ID?fields=status_code,status&access_token=$ACCESS_TOKEN")
+            echo "$RESPONSE"
+
+            STATUS=$(python -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status_code",""))' <<< "$RESPONSE")
+
+            case "$STATUS" in
+              FINISHED) exit 0 ;;
+              ERROR|EXPIRED)
+                echo "Instagram processing failed: $STATUS"
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+
+          echo "Timed out waiting for Instagram processing."
+          exit 1
+
+      - name: Publish to Instagram
+        env:
+          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          CONTAINER_ID: ${{ steps.container.outputs.container_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl --fail-with-body -sS -X POST             "https://graph.facebook.com/v24.0/$IG_USER_ID/media_publish"             --data-urlencode "creation_id=$CONTAINER_ID"             --data-urlencode "access_token=$ACCESS_TOKEN")
+          echo "$RESPONSE"
