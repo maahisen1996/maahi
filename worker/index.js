@@ -75,9 +75,11 @@ async function getCaption(item) {
 }
 
 async function getImageBytes(stem) {
-  const r = await gh(`queue/${stem}.jpg.b64`);
-  const obj = await r.json();
-  const raw = atob((obj.content || "").replace(/\n/g, ""));
+  const rawUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.jpg.b64`;
+  const r = await fetch(rawUrl, { cf: { cacheTtl: 300, cacheEverything: true } });
+  if (!r.ok) throw new Error(`Image ${stem}: ${r.status}`);
+  const encoded = (await r.text()).replace(/\s/g, "");
+  const raw = atob(encoded);
   const bytes = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
   return bytes;
@@ -110,13 +112,13 @@ async function igPost(url, body, env) {
 }
 
 async function publishStem(stem, env) {
-  const done = await env.MAAHI_STATE.get(`posted:${stem}`);
-  if (done) return { ok: true, skipped: "already-marked", stem, media_id: done };
-
   const queue = await listQueue();
   const item = queue.find((x) => x.stem === stem || x.stem.startsWith(`${stem}_`));
   if (!item) throw new Error(`Queue item not found: ${stem}`);
   stem = item.stem;
+
+  const done = await env.MAAHI_STATE.get(`posted:${stem}`);
+  if (done) return { ok: true, skipped: "already-marked", stem, media_id: done };
 
   const caption = await getCaption(item);
   const existing = await alreadyOnInstagram(env, caption);
@@ -218,13 +220,17 @@ export default {
 
     if (url.pathname.startsWith("/image/")) {
       const stem = decodeURIComponent(url.pathname.slice(7));
-      const bytes = await getImageBytes(stem);
-      return new Response(bytes, {
-        headers: {
-          "content-type": "image/jpeg",
-          "cache-control": "public, max-age=300",
-        },
-      });
+      try {
+        const bytes = await getImageBytes(stem);
+        return new Response(bytes, {
+          headers: {
+            "content-type": "image/jpeg",
+            "cache-control": "public, max-age=300",
+          },
+        });
+      } catch (e) {
+        return new Response("not found", { status: 404 });
+      }
     }
 
     if (url.pathname === "/health") {
