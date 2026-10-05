@@ -70,6 +70,9 @@ async function listQueue() {
     if (item.name === "test-trigger.txt") continue;
     if (item.name.endsWith(".txt")) captions.set(item.name.slice(0, -4), item.download_url);
     if (item.name.endsWith(".jpg.b64")) images.add(item.name.slice(0, -8));
+    else if (item.name.endsWith(".png")) images.add(item.name.slice(0, -4));
+    else if (item.name.endsWith(".jpg")) images.add(item.name.slice(0, -4));
+    else if (item.name.endsWith(".jpeg")) images.add(item.name.slice(0, -5));
   }
   return [...captions.entries()]
     .filter(([stem]) => images.has(stem))
@@ -83,15 +86,40 @@ async function getCaption(item) {
   return (await r.text()).trim();
 }
 
-async function getImageBytes(stem) {
-  const rawUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.jpg.b64`;
-  const r = await fetch(rawUrl, { cf: { cacheTtl: 300, cacheEverything: true } });
+async function getImageResponse(stem) {
+  for (const ext of ["png", "jpg", "jpeg"]) {
+    const rawUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.${ext}`;
+    const r = await fetch(rawUrl, {
+      cf: {
+        cacheTtl: 300,
+        cacheEverything: true,
+        image: { format: "jpeg", quality: 95 },
+      },
+    });
+    if (r.ok) {
+      return new Response(r.body, {
+        status: 200,
+        headers: {
+          "content-type": "image/jpeg",
+          "cache-control": "public, max-age=300",
+        },
+      });
+    }
+  }
+
+  const legacyUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.jpg.b64`;
+  const r = await fetch(legacyUrl, { cf: { cacheTtl: 300, cacheEverything: true } });
   if (!r.ok) throw new Error(`Image ${stem}: ${r.status}`);
-  const encoded = (await r.text()).replace(/\s/g, "");
+  const encoded = (await r.text()).replace(/\\s/g, "");
   const raw = atob(encoded);
   const bytes = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  return bytes;
+  return new Response(bytes, {
+    headers: {
+      "content-type": "image/jpeg",
+      "cache-control": "public, max-age=300",
+    },
+  });
 }
 
 async function alreadyOnInstagram(env, caption) {
@@ -271,13 +299,7 @@ export default {
     if (url.pathname.startsWith("/image/")) {
       const stem = decodeURIComponent(url.pathname.slice(7));
       try {
-        const bytes = await getImageBytes(stem);
-        return new Response(bytes, {
-          headers: {
-            "content-type": "image/jpeg",
-            "cache-control": "public, max-age=300",
-          },
-        });
+        return await getImageResponse(stem);
       } catch (e) {
         return new Response("not found", { status: 404 });
       }
