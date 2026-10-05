@@ -42,7 +42,7 @@ jobs:
       - name: Create Instagram media container
         id: container
         env:
-          IG_USER_ID: 17841424446542500
+          IG_USER_ID: '17841424446542500'
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           IMAGE_URL: ${{ steps.content.outputs.image_url }}
           CAPTION: ${{ steps.content.outputs.caption }}
