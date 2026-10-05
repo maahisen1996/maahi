@@ -5,10 +5,11 @@ on:
     paths:
       - ".github/workflows/publish-instagram.yml"
       - "content.json"
+      - "media/mahi-intro.jpg"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   publish:
@@ -17,47 +18,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Materialize and validate JPEG
-        id: image
+      - name: Verify image
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import base64, pathlib
+          test -f media/mahi-intro.jpg
+          test "$(stat -c%s media/mahi-intro.jpg)" -gt 10000
 
-          s = pathlib.Path("media/mahi-intro.b64").read_text().strip()
-          data = base64.b64decode(s, validate=True)
-          if not (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9") and len(data) > 10000):
-              raise SystemExit("Invalid JPEG payload")
-          pathlib.Path("media/mahi-intro.jpg").write_bytes(data)
-          print(f"JPEG validated: {len(data)} bytes")
-          PY
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          python -m pip install --disable-pip-version-check -q pillow
-          python - <<'PY'
-          from PIL import Image
-          src="media/mahi-intro.jpg"
-          dst="media/mahi-intro-instagram.jpg"
-          with Image.open(src) as im:
-              print("Decoded:", im.format, im.size, im.mode)
-              rgb=im.convert("RGB")
-              rgb.save(dst, format="JPEG", quality=92, optimize=True)
-          with Image.open(dst) as out:
-              print("Re-encoded:", out.format, out.size, out.mode)
-          PY
-
-          git add media/mahi-intro.jpg media/mahi-intro-instagram.jpg
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: materialize Mahi Instagram JPEG"
-            git push
-          fi
-
-          PUBLISHED_SHA=$(git rev-parse HEAD)
-          IMAGE_URL="https://raw.githubusercontent.com/maahisen1996/maahi/$PUBLISHED_SHA/media/mahi-intro-instagram.jpg"
-          echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
-          curl -fsSL -o /dev/null "$IMAGE_URL"
+      - name: Build public image URL
+        id: image
+        shell: bash
+        run: |
+          echo "image_url=https://raw.githubusercontent.com/maahisen1996/maahi/$GITHUB_SHA/media/mahi-intro.jpg" >> "$GITHUB_OUTPUT"
 
       - name: Read caption
         id: content
