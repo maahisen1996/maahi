@@ -90,17 +90,17 @@ async function getImageResponse(stem) {
   for (const ext of ["png", "jpg", "jpeg"]) {
     const rawUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.${ext}`;
     const r = await fetch(rawUrl, {
-      cf: {
-        cacheTtl: 300,
-        cacheEverything: true,
-        image: { format: "jpeg", quality: 95 },
-      },
+      cf: { cacheTtl: 300, cacheEverything: true },
     });
     if (r.ok) {
+      const contentType =
+        ext === "png" ? "image/png" :
+        ext === "jpg" || ext === "jpeg" ? "image/jpeg" :
+        (r.headers.get("content-type") || "application/octet-stream");
       return new Response(r.body, {
         status: 200,
         headers: {
-          "content-type": "image/jpeg",
+          "content-type": contentType,
           "cache-control": "public, max-age=300",
         },
       });
@@ -233,8 +233,9 @@ async function ensureDailyPlan(env) {
   const existing = await env.MAAHI_STATE.get(key, "json");
   if (existing) return existing;
 
+  // Natural posting cadence: 20% no post, 60% one post, 20% two posts.
   const roll = randInt(1, 100);
-  const count = roll <= 70 ? 1 : 2;
+  const count = roll <= 20 ? 0 : roll <= 80 ? 1 : 2;
   const windows = [
     ["10:00", "14:00"],
     ["18:00", "21:30"],
