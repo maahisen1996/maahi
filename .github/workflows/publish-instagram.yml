@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
@@ -17,14 +17,36 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Verify public image
+      - name: Materialize and validate JPEG
+        id: image
         shell: bash
         run: |
           set -euo pipefail
-          test -f media/mahi-intro.jpg
-          curl -fsSLI "https://raw.githubusercontent.com/maahisen1996/maahi/main/media/mahi-intro.jpg" >/dev/null
+          python - <<'PY'
+          import base64, pathlib
 
-      - name: Read post content
+          s = pathlib.Path("media/mahi-intro.b64").read_text().strip()
+          data = base64.b64decode(s, validate=True)
+          if not (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9") and len(data) > 10000):
+              raise SystemExit("Invalid JPEG payload")
+          pathlib.Path("media/mahi-intro.jpg").write_bytes(data)
+          print(f"JPEG validated: {len(data)} bytes")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add media/mahi-intro.jpg
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: materialize Mahi JPEG"
+            git push
+          fi
+
+          PUBLISHED_SHA=$(git rev-parse HEAD)
+          IMAGE_URL="https://raw.githubusercontent.com/maahisen1996/maahi/$PUBLISHED_SHA/media/mahi-intro.jpg"
+          echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+          curl -fsSLI "$IMAGE_URL" >/dev/null
+
+      - name: Read caption
         id: content
         shell: bash
         run: |
@@ -32,7 +54,6 @@ jobs:
           import json
           with open("content.json", encoding="utf-8") as f:
               d=json.load(f)
-          print("image_url="+d["image_url"])
           print("caption<<EOF")
           print(d["caption"])
           print("EOF")
@@ -56,7 +77,7 @@ jobs:
         env:
           IG_USER_ID: ${{ steps.account.outputs.ig_user_id }}
           ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
-          IMAGE_URL: ${{ steps.content.outputs.image_url }}
+          IMAGE_URL: ${{ steps.image.outputs.image_url }}
           CAPTION: ${{ steps.content.outputs.caption }}
         shell: bash
         run: |
