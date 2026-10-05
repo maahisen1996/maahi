@@ -67,6 +67,19 @@ jobs:
           print("Contains equals:", "=" in t)
           PY
 
+          python - <<'PY'
+          import os
+          t=os.environ["ACCESS_TOKEN"]
+          print("Starts {:", t.startswith("{"))
+          print("Starts [:", t.startswith("["))
+          print("Starts Bearer:", t.startswith("Bearer"))
+          print("Starts https:", t.startswith("http"))
+          print("Contains JSON marker:", '"access_token"' in t or '"token"' in t)
+          print("Colon count:", t.count(":"))
+          print("Dot count:", t.count("."))
+          print("Length:", len(t))
+          PY
+
           RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/me"             --data-urlencode "fields=user_id,username,account_type"             -H "Authorization: Bearer $ACCESS_TOKEN")
           echo "$RESPONSE"
           IG_USER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["user_id"])' <<< "$RESPONSE")
