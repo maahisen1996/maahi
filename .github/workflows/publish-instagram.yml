@@ -45,6 +45,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import os, re
+          token=os.environ["ACCESS_TOKEN"]
+          print("Token present:", bool(token))
+          print("Token length:", len(token))
+          print("Contains whitespace:", bool(re.search(r"\s", token)))
+          print("Contains quote characters:", any(c in token for c in ['"', "'"]))
+          PY
+
           RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/me"             --data-urlencode "fields=user_id,username,account_type"             -H "Authorization: Bearer $ACCESS_TOKEN")
           echo "$RESPONSE"
           IG_USER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["user_id"])' <<< "$RESPONSE")
