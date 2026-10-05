@@ -1,0 +1,114 @@
+name: Publish Mahi Instagram
+
+on:
+  push:
+    paths:
+      - "content.json"
+      - ".github/workflows/publish-instagram.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read content
+        id: content
+        shell: bash
+        run: |
+          IMAGE_URL=$(python - <<'PY'
+          import json
+          with open("content.json", encoding="utf-8") as f:
+              print(json.load(f)["image_url"])
+          PY
+          )
+          CAPTION=$(python - <<'PY'
+          import json
+          with open("content.json", encoding="utf-8") as f:
+              print(json.load(f)["caption"])
+          PY
+          )
+
+          if [ -z "$IMAGE_URL" ]; then
+            echo "image_url is empty; nothing to publish."
+            exit 1
+          fi
+
+          if [[ "$IMAGE_URL" != https://* ]]; then
+            echo "image_url must be an HTTPS URL."
+            exit 1
+          fi
+
+          {
+            echo "image_url=$IMAGE_URL"
+            echo "caption<<EOF"
+            printf '%s\n' "$CAPTION"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Instagram media container
+        id: container
+        env:
+          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          IMAGE_URL: ${{ steps.content.outputs.image_url }}
+          CAPTION: ${{ steps.content.outputs.caption }}
+        shell: bash
+        run: |
+          RESPONSE=$(curl --fail-with-body -sS -X POST \
+            "https://graph.facebook.com/v24.0/$IG_USER_ID/media" \
+            --data-urlencode "image_url=$IMAGE_URL" \
+            --data-urlencode "caption=$CAPTION" \
+            --data-urlencode "access_token=$ACCESS_TOKEN")
+
+          echo "$RESPONSE"
+
+          CONTAINER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$RESPONSE")
+          echo "container_id=$CONTAINER_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for media processing
+        env:
+          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          CONTAINER_ID: ${{ steps.container.outputs.container_id }}
+        shell: bash
+        run: |
+          for i in {1..12}; do
+            RESPONSE=$(curl --fail-with-body -sS \
+              "https://graph.facebook.com/v24.0/$CONTAINER_ID?fields=status_code,status&access_token=$ACCESS_TOKEN")
+
+            echo "$RESPONSE"
+
+            STATUS=$(python -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status_code",""))' <<< "$RESPONSE")
+
+            if [ "$STATUS" = "FINISHED" ]; then
+              exit 0
+            fi
+
+            if [ "$STATUS" = "ERROR" ] || [ "$STATUS" = "EXPIRED" ]; then
+              echo "Instagram media processing failed: $STATUS"
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for Instagram media processing."
+          exit 1
+
+      - name: Publish Instagram post
+        env:
+          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          CONTAINER_ID: ${{ steps.container.outputs.container_id }}
+        shell: bash
+        run: |
+          curl --fail-with-body -sS -X POST \
+            "https://graph.facebook.com/v24.0/$IG_USER_ID/media_publish" \
+            --data-urlencode "creation_id=$CONTAINER_ID" \
+            --data-urlencode "access_token=$ACCESS_TOKEN"
