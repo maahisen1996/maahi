@@ -42,7 +42,7 @@ jobs:
           fi
 
           PUBLISHED_SHA=$(git rev-parse HEAD)
-          IMAGE_URL="https://raw.githubusercontent.com/maahisen1996/maahi/$PUBLISHED_SHA/media/mahi-intro.jpg"
+          IMAGE_URL="https://cdn.jsdelivr.net/gh/maahisen1996/maahi@$PUBLISHED_SHA/media/mahi-intro.jpg"
           echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
           curl -fsSLI "$IMAGE_URL" >/dev/null
 
