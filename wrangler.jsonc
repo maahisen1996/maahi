@@ -6,7 +6,14 @@
   "triggers": {
     "crons": ["*/15 * * * *"]
   },
+  "kv_namespaces": [
+    {
+      "binding": "MAAHI_STATE",
+      "id": "552cabc3c3b341c9a3caa27ee0270b28"
+    }
+  ],
   "vars": {
-    "IG_USER_ID": "17841424446542500"
+    "IG_USER_ID": "17841424446542500",
+    "PUBLIC_BASE_URL": "https://maahi-instagram-worker.maahisen1996.workers.dev"
   }
 }
