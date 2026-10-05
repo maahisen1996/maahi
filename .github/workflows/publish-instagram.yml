@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - ".github/workflows/publish-instagram.yml"
+      - "content.json"
   workflow_dispatch:
 
 permissions:
