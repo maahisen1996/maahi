@@ -87,20 +87,23 @@ async function getCaption(item) {
 }
 
 async function getImageResponse(stem) {
+  // Keep PNG/JPG originals in the repo as masters. Instagram photo publishing
+  // expects a JPEG-compatible delivery URL, so transcode only at delivery time
+  // and use maximum JPEG quality to minimize generation loss.
   for (const ext of ["png", "jpg", "jpeg"]) {
     const rawUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.${ext}`;
     const r = await fetch(rawUrl, {
-      cf: { cacheTtl: 300, cacheEverything: true },
+      cf: {
+        cacheTtl: 300,
+        cacheEverything: true,
+        image: { format: "jpeg", quality: 100 },
+      },
     });
     if (r.ok) {
-      const contentType =
-        ext === "png" ? "image/png" :
-        ext === "jpg" || ext === "jpeg" ? "image/jpeg" :
-        (r.headers.get("content-type") || "application/octet-stream");
       return new Response(r.body, {
         status: 200,
         headers: {
-          "content-type": contentType,
+          "content-type": "image/jpeg",
           "cache-control": "public, max-age=300",
         },
       });
