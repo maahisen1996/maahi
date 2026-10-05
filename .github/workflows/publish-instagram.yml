@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          RESPONSE=$(curl -sS             "https://graph.instagram.com/v25.0/me?fields=id,username,account_type&access_token=$ACCESS_TOKEN")
+          RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/me" --data-urlencode "fields=id,username,account_type" --data-urlencode "access_token=$ACCESS_TOKEN")
           echo "$RESPONSE"
           IG_USER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$RESPONSE")
           echo "ig_user_id=$IG_USER_ID" >> "$GITHUB_OUTPUT"
