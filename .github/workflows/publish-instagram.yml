@@ -1,4 +1,4 @@
-name: Mahi Automation Diagnostic
+name: Prepare Mahi Image
 
 on:
   push:
@@ -9,35 +9,34 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnostic:
+  prepare:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Decode and validate image
+      - name: Materialize JPEG
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode media/mahi-intro.b64 > /tmp/mahi-intro.jpg
-          file /tmp/mahi-intro.jpg
-          ls -lh /tmp/mahi-intro.jpg
+          base64 --decode media/mahi-intro.b64 > media/mahi-intro.jpg
           python - <<'PY'
           from pathlib import Path
-          p = Path("/tmp/mahi-intro.jpg")
-          data = p.read_bytes()
+          p=Path("media/mahi-intro.jpg")
+          data=p.read_bytes()
           assert data[:2] == b"\xff\xd8", "Not a JPEG"
-          assert len(data) > 10000, f"Image is unexpectedly small: {len(data)} bytes"
-          print(f"JPEG validation passed: {len(data)} bytes")
+          assert len(data) > 10000, f"Image unexpectedly small: {len(data)} bytes"
+          print(f"Validated JPEG: {len(data)} bytes")
           PY
 
-      - name: Verify public image URL
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="https://raw.githubusercontent.com/maahisen1996/maahi/main/media/mahi-intro.jpg"
-          echo "Checking: $URL"
-          curl -fsSLI "$URL"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add media/mahi-intro.jpg
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: materialize Mahi image"
+            git push
+          else
+            echo "Image already present and unchanged."
+          fi
