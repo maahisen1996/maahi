@@ -38,79 +38,62 @@ jobs:
           print("EOF")
           PY
 
-      - name: Resolve Facebook Login token to Instagram account
+      - name: Identify Instagram account
         id: account
         env:
-          USER_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
         shell: bash
         run: |
           set -euo pipefail
-
-          RESPONSE=$(curl -G -sS "https://graph.facebook.com/v25.0/me/accounts"             --data-urlencode "fields=id,name,access_token,instagram_business_account"             -H "Authorization: Bearer $USER_TOKEN")
-
+          RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/me"             --data-urlencode "fields=user_id,username,account_type"             -H "Authorization: Bearer $ACCESS_TOKEN")
           echo "$RESPONSE"
-
-          python - <<'PY' "$RESPONSE" >> "$GITHUB_OUTPUT"
-          import json,sys
-          d=json.loads(sys.argv[1])
-          pages=d.get("data", [])
-          match=next((p for p in pages if p.get("instagram_business_account", {}).get("id")), None)
-          if not match:
-              raise SystemExit("No Facebook Page with a connected Instagram professional account was found.")
-          print("ig_user_id="+match["instagram_business_account"]["id"])
-          print("page_access_token="+match["access_token"])
-          print("page_id="+match["id"])
-          PY
+          IG_USER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["user_id"])' <<< "$RESPONSE")
+          echo "ig_user_id=$IG_USER_ID" >> "$GITHUB_OUTPUT"
 
       - name: Create Instagram media container
         id: container
         env:
           IG_USER_ID: ${{ steps.account.outputs.ig_user_id }}
-          PAGE_ACCESS_TOKEN: ${{ steps.account.outputs.page_access_token }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           IMAGE_URL: ${{ steps.content.outputs.image_url }}
           CAPTION: ${{ steps.content.outputs.caption }}
         shell: bash
         run: |
           set -euo pipefail
-          RESPONSE=$(curl -sS -X POST             "https://graph.facebook.com/v25.0/$IG_USER_ID/media"             --data-urlencode "image_url=$IMAGE_URL"             --data-urlencode "caption=$CAPTION"             --data-urlencode "access_token=$PAGE_ACCESS_TOKEN")
-
+          RESPONSE=$(curl -sS -X POST             "https://graph.instagram.com/v25.0/$IG_USER_ID/media"             -H "Authorization: Bearer $ACCESS_TOKEN"             --data-urlencode "image_url=$IMAGE_URL"             --data-urlencode "caption=$CAPTION")
           echo "$RESPONSE"
-
           CONTAINER_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$RESPONSE")
           echo "container_id=$CONTAINER_ID" >> "$GITHUB_OUTPUT"
 
       - name: Wait for Instagram processing
         env:
-          PAGE_ACCESS_TOKEN: ${{ steps.account.outputs.page_access_token }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           CONTAINER_ID: ${{ steps.container.outputs.container_id }}
         shell: bash
         run: |
           set -euo pipefail
           for i in {1..18}; do
-            RESPONSE=$(curl -G -sS               "https://graph.facebook.com/v25.0/$CONTAINER_ID"               --data-urlencode "fields=status_code,status"               --data-urlencode "access_token=$PAGE_ACCESS_TOKEN")
+            RESPONSE=$(curl -G -sS "https://graph.instagram.com/v25.0/$CONTAINER_ID"               --data-urlencode "fields=status_code,status"               -H "Authorization: Bearer $ACCESS_TOKEN")
             echo "$RESPONSE"
-
             STATUS=$(python -c 'import json,sys; print(json.load(sys.stdin).get("status_code",""))' <<< "$RESPONSE")
             case "$STATUS" in
               FINISHED) exit 0 ;;
               ERROR|EXPIRED)
                 echo "Instagram processing failed: $STATUS"
-                exit 1
-                ;;
+                exit 1 ;;
             esac
             sleep 10
           done
-
           echo "Timed out waiting for Instagram processing."
           exit 1
 
       - name: Publish to Instagram
         env:
           IG_USER_ID: ${{ steps.account.outputs.ig_user_id }}
-          PAGE_ACCESS_TOKEN: ${{ steps.account.outputs.page_access_token }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           CONTAINER_ID: ${{ steps.container.outputs.container_id }}
         shell: bash
         run: |
           set -euo pipefail
-          RESPONSE=$(curl -sS -X POST             "https://graph.facebook.com/v25.0/$IG_USER_ID/media_publish"             --data-urlencode "creation_id=$CONTAINER_ID"             --data-urlencode "access_token=$PAGE_ACCESS_TOKEN")
+          RESPONSE=$(curl -sS -X POST             "https://graph.instagram.com/v25.0/$IG_USER_ID/media_publish"             -H "Authorization: Bearer $ACCESS_TOKEN"             --data-urlencode "creation_id=$CONTAINER_ID")
           echo "$RESPONSE"
