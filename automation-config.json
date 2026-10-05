@@ -1,0 +1,12 @@
+{
+  "timezone": "America/Los_Angeles",
+  "daily_post_probabilities": {
+    "1": 0.7,
+    "2": 0.3
+  },
+  "windows": [
+    {"start": "10:00", "end": "14:00"},
+    {"start": "18:00", "end": "21:30"}
+  ],
+  "check_interval_minutes": 30
+}
