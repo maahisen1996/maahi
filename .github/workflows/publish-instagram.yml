@@ -39,7 +39,7 @@ jobs:
         id: container
         env:
           IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
-          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           IMAGE_URL: ${{ steps.content.outputs.image_url }}
           CAPTION: ${{ steps.content.outputs.caption }}
         shell: bash
@@ -56,7 +56,7 @@ jobs:
 
       - name: Wait for Instagram processing
         env:
-          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           CONTAINER_ID: ${{ steps.container.outputs.container_id }}
         shell: bash
         run: |
@@ -83,7 +83,7 @@ jobs:
       - name: Publish to Instagram
         env:
           IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
-          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS }}
           CONTAINER_ID: ${{ steps.container.outputs.container_id }}
         shell: bash
         run: |
