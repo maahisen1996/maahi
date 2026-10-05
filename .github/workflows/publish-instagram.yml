@@ -43,7 +43,7 @@ jobs:
 
           PUBLISHED_SHA=$(git rev-parse HEAD)
           SOURCE_URL="https://raw.githubusercontent.com/maahisen1996/maahi/$PUBLISHED_SHA/media/mahi-intro.jpg"
-          IMAGE_URL="https://images.weserv.nl/?url=$(python -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SOURCE_URL")"
+          IMAGE_URL="https://wsrv.nl/?url=$(python -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SOURCE_URL")&output=jpg"
           echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
           curl -fsSLI "$IMAGE_URL" >/dev/null
 
