@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "maahi-instagram-worker",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-05",
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "vars": {
+    "IG_USER_ID": "17841424446542500"
+  }
+}
