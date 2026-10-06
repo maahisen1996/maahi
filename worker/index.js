@@ -70,7 +70,11 @@ async function getDriveImageResponse(fileId, env) {
     cf: {
       cacheTtl: 300,
       cacheEverything: true,
-      image: { format: "jpeg", quality: 100 },
+      image: {
+        format: "jpeg",
+        quality: 95,
+        "origin-auth": "share-publicly",
+      },
     },
   });
 
@@ -78,10 +82,17 @@ async function getDriveImageResponse(fileId, env) {
     throw new Error(`Drive image ${fileId}: ${r.status} ${await r.text()}`);
   }
 
+  const contentType = (r.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.startsWith("image/jpeg")) {
+    throw new Error(
+      `Drive image transform did not return JPEG for ${fileId}; content-type=${contentType || "missing"}; cf-resized=${r.headers.get("cf-resized") || "missing"}`
+    );
+  }
+
   return new Response(r.body, {
     status: 200,
     headers: {
-      "content-type": "image/jpeg",
+      "content-type": contentType,
       "cache-control": "public, max-age=300",
     },
   });
@@ -319,8 +330,8 @@ export default {
       const fileId = decodeURIComponent(url.pathname.slice("/drive-image/".length));
       try {
         return await getDriveImageResponse(fileId, env);
-      } catch (_) {
-        return new Response("not found", { status: 404 });
+      } catch (e) {
+        return new Response(String(e?.message || e), { status: 502 });
       }
     }
 
