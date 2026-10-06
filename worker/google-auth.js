@@ -14,15 +14,48 @@ function base64Url(input) {
 }
 
 function pemToArrayBuffer(pem) {
-  const normalized = pem
-    .trim()
-    .replace(/^"|"$/g, "")
-    .replace(/\\n/g, "\n");
+  if (!pem || typeof pem !== "string") {
+    throw new Error("GOOGLE_PRIVATE_KEY is missing or not a string");
+  }
 
-  const clean = normalized
-    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
-    .replace(/-----END PRIVATE KEY-----/g, "")
-    .replace(/\s+/g, "");
+  let normalized = pem.trim();
+
+  // Accept either the raw private_key value, a JSON-quoted private_key string,
+  // or (accidentally) the entire service-account JSON object.
+  try {
+    if (normalized.startsWith("{")) {
+      const obj = JSON.parse(normalized);
+      if (obj?.private_key) normalized = obj.private_key;
+    } else if (normalized.startsWith('"') && normalized.endsWith('"')) {
+      normalized = JSON.parse(normalized);
+    }
+  } catch (_) {
+    normalized = normalized.replace(/^"|"$/g, "");
+  }
+
+  normalized = normalized.replace(/\\n/g, "\n").trim();
+
+  const match = normalized.match(
+    /-----BEGIN PRIVATE KEY-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END PRIVATE KEY-----/
+  );
+
+  let clean;
+  if (match) {
+    clean = match[1].replace(/\s+/g, "");
+  } else {
+    clean = normalized
+      .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+      .replace(/-----END PRIVATE KEY-----/g, "")
+      .replace(/\s+/g, "");
+  }
+
+  if (!clean || !/^[A-Za-z0-9+/]+={0,2}$/.test(clean)) {
+    throw new Error(
+      "GOOGLE_PRIVATE_KEY format is invalid. Paste the private_key value from the Google JSON key, including BEGIN/END PRIVATE KEY markers."
+    );
+  }
+
+  while (clean.length % 4 !== 0) clean += "=";
 
   const binary = atob(clean);
   const bytes = new Uint8Array(binary.length);
@@ -71,31 +104,23 @@ export async function getGoogleDriveAccessToken(env) {
     new TextEncoder().encode(unsignedJwt)
   );
 
-  const assertion =
-    `${unsignedJwt}.${base64Url(signature)}`;
+  const assertion = `${unsignedJwt}.${base64Url(signature)}`;
 
-  const response = await fetch(
-    "https://oauth2.googleapis.com/token",
-    {
-      method: "POST",
-      headers: {
-        "content-type":
-          "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        grant_type:
-          "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        assertion,
-      }),
-    }
-  );
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
 
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(
-      `Google token error ${response.status}: ${text}`
-    );
+    throw new Error(`Google token error ${response.status}: ${text}`);
   }
 
   return JSON.parse(text).access_token;
