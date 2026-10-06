@@ -6,6 +6,8 @@ import {
 } from "./google-drive.js";
 
 const GRAPH_BASE = "https://graph.instagram.com/v25.0";
+const META_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const PROCESSING_BACKOFF_MS = [15000, 30000, 60000, 60000];
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -50,6 +52,38 @@ async function recordEvent(env, key, payload) {
       { expirationTtl: 604800 }
     );
   } catch (_) {}
+}
+
+async function getMetaCooldown(env) {
+  const raw = await env.MAAHI_STATE.get("meta:cooldown_until");
+  const until = Number(raw || 0);
+  if (!until || until <= Date.now()) {
+    if (raw) await env.MAAHI_STATE.delete("meta:cooldown_until");
+    return null;
+  }
+  return until;
+}
+
+async function setMetaCooldown(env, reason) {
+  const until = Date.now() + META_COOLDOWN_MS;
+  await env.MAAHI_STATE.put("meta:cooldown_until", String(until), {
+    expirationTtl: Math.ceil(META_COOLDOWN_MS / 1000) + 300,
+  });
+  await recordEvent(env, "meta:cooldown", {
+    until: new Date(until).toISOString(),
+    reason,
+  });
+  return until;
+}
+
+function metaRestrictionFromPayload(payload) {
+  const err = payload?.error;
+  if (!err) return false;
+  return (
+    err.code === 4 ||
+    err.error_subcode === 2207051 ||
+    /action is blocked|application request limit reached/i.test(err.message || "")
+  );
 }
 
 async function getDriveQueue(env) {
@@ -114,6 +148,12 @@ async function igPost(url, body, env) {
   }
 
   if (!r.ok || !data.id) {
+    if (metaRestrictionFromPayload(data)) {
+      const until = await setMetaCooldown(env, text);
+      const error = new Error(`Meta cooldown active until ${new Date(until).toISOString()}: ${text}`);
+      error.metaCooldown = true;
+      throw error;
+    }
     throw new Error(`Instagram ${r.status}: ${text}`);
   }
   return data;
@@ -123,6 +163,16 @@ async function publishStem(stem, env) {
   let phase = "start";
 
   try {
+    const cooldownUntil = await getMetaCooldown(env);
+    if (cooldownUntil) {
+      return {
+        ok: false,
+        skipped: "meta-cooldown",
+        cooldown_until: new Date(cooldownUntil).toISOString(),
+        stem,
+      };
+    }
+
     phase = "list-drive-queue";
     const { accessToken, queue } = await getDriveQueue(env);
     const item = queue.find((x) => x.stem === stem || x.stem.startsWith(`${stem}_`));
@@ -155,7 +205,10 @@ async function publishStem(stem, env) {
       );
 
       phase = "wait-processing";
-      for (let i = 0; i < 18; i++) {
+      let finished = false;
+      for (const delayMs of PROCESSING_BACKOFF_MS) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
         const u = new URL(`${GRAPH_BASE}/${container.id}`);
         u.searchParams.set("fields", "status_code,status");
         const r = await fetch(u, {
@@ -170,16 +223,23 @@ async function publishStem(stem, env) {
         }
 
         if (!r.ok) {
+          if (metaRestrictionFromPayload(data)) {
+            const until = await setMetaCooldown(env, text);
+            throw new Error(`Meta cooldown active until ${new Date(until).toISOString()}: ${text}`);
+          }
           throw new Error(`Instagram processing lookup ${r.status}: ${text}`);
         }
-        if (data.status_code === "FINISHED") break;
+        if (data.status_code === "FINISHED") {
+          finished = true;
+          break;
+        }
         if (["ERROR", "EXPIRED"].includes(data.status_code)) {
           throw new Error(`Instagram processing ${data.status_code}: ${text}`);
         }
-        if (i === 17) {
-          throw new Error(`Instagram processing timed out: ${text}`);
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10000));
+      }
+
+      if (!finished) {
+        throw new Error("Instagram processing did not finish within safe polling window");
       }
 
       phase = "publish-container";
@@ -219,18 +279,12 @@ async function ensureDailyPlan(env) {
   const existing = await env.MAAHI_STATE.get(key, "json");
   if (existing) return existing;
 
-  const roll = randInt(1, 100);
-  const count = roll <= 20 ? 0 : roll <= 80 ? 1 : 2;
-  const windows = [
-    ["10:00", "14:00"],
-    ["18:00", "21:30"],
-  ];
-
+  // Conservative rollout: at most one Instagram post per day.
+  const count = randInt(1, 100) <= 20 ? 0 : 1;
   const slots = [];
-  for (let i = 0; i < count; i++) {
-    const [start, end] = windows[i];
+  if (count === 1) {
     slots.push({
-      minute: randInt(minutesOfDay(start), minutesOfDay(end)),
+      minute: randInt(minutesOfDay("10:00"), minutesOfDay("20:30")),
       done: false,
       post_id: null,
     });
@@ -243,6 +297,17 @@ async function ensureDailyPlan(env) {
 
 async function scheduledRun(env) {
   await recordEvent(env, "last_run", { phase: "scheduled-start" });
+
+  const cooldownUntil = await getMetaCooldown(env);
+  if (cooldownUntil) {
+    const result = {
+      ok: true,
+      skipped: "meta-cooldown",
+      cooldown_until: new Date(cooldownUntil).toISOString(),
+    };
+    await recordEvent(env, "last_run", { phase: "scheduled-finish", result });
+    return result;
+  }
 
   const now = pacificParts();
   const plan = await ensureDailyPlan(env);
@@ -263,7 +328,7 @@ async function scheduledRun(env) {
     const stem = available[randInt(0, available.length - 1)];
     const result = await publishStem(stem, env);
 
-    if (result.ok) {
+    if (result.ok && !result.skipped) {
       slot.done = true;
       slot.post_id = result.stem;
       await env.MAAHI_STATE.put(
@@ -313,12 +378,14 @@ export default {
         const accessToken = await getGoogleDriveAccessToken(env);
         const rootFiles = await listGoogleDriveFilesWithToken(env, accessToken);
         const queue = await buildDriveQueueWithToken(env, accessToken);
+        const cooldownUntil = await getMetaCooldown(env);
         return json({
           ok: true,
           folder_id: env.GOOGLE_DRIVE_FOLDER_ID,
           root_file_count: rootFiles.length,
           root_files: rootFiles,
           matched_queue_count: queue.length,
+          meta_cooldown_until: cooldownUntil ? new Date(cooldownUntil).toISOString() : null,
           queue,
         });
       } catch (e) {
@@ -336,10 +403,12 @@ export default {
     }
 
     if (url.pathname === "/health") {
+      const cooldownUntil = await getMetaCooldown(env);
       return json({
         ok: true,
         service: "maahi-instagram-worker",
         source: "google-drive",
+        meta_cooldown_until: cooldownUntil ? new Date(cooldownUntil).toISOString() : null,
         time: new Date().toISOString(),
       });
     }
