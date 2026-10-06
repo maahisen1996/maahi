@@ -14,7 +14,12 @@ function base64Url(input) {
 }
 
 function pemToArrayBuffer(pem) {
-  const clean = pem
+  const normalized = pem
+    .trim()
+    .replace(/^"|"$/g, "")
+    .replace(/\\n/g, "\n");
+
+  const clean = normalized
     .replace(/-----BEGIN PRIVATE KEY-----/g, "")
     .replace(/-----END PRIVATE KEY-----/g, "")
     .replace(/\s+/g, "");
