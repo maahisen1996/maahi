@@ -1,8 +1,10 @@
 import { getGoogleDriveAccessToken } from "./google-auth.js";
-import { listGoogleDriveFilesWithToken } from "./google-drive.js";
-const GITHUB_OWNER = "maahisen1996";
-const GITHUB_REPO = "maahi";
-const GITHUB_BRANCH = "main";
+import {
+  buildDriveQueueWithToken,
+  listGoogleDriveFilesWithToken,
+  readGoogleDriveTextWithToken,
+} from "./google-drive.js";
+
 const GRAPH_BASE = "https://graph.instagram.com/v25.0";
 
 function json(data, status = 200) {
@@ -42,84 +44,38 @@ function randInt(min, max) {
 
 async function recordEvent(env, key, payload) {
   try {
-    await env.MAAHI_STATE.put(key, JSON.stringify({
-      at: new Date().toISOString(),
-      ...payload,
-    }), { expirationTtl: 604800 });
+    await env.MAAHI_STATE.put(
+      key,
+      JSON.stringify({ at: new Date().toISOString(), ...payload }),
+      { expirationTtl: 604800 }
+    );
   } catch (_) {}
 }
 
-async function gh(path) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${path}?ref=${GITHUB_BRANCH}`;
+async function getDriveQueue(env) {
+  const accessToken = await getGoogleDriveAccessToken(env);
+  const queue = await buildDriveQueueWithToken(env, accessToken);
+  return { accessToken, queue };
+}
+
+async function getCaption(item, accessToken) {
+  return readGoogleDriveTextWithToken(item.captionId, accessToken);
+}
+
+async function getDriveImageResponse(fileId, env) {
+  const accessToken = await getGoogleDriveAccessToken(env);
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
   const r = await fetch(url, {
-    headers: {
-      "user-agent": "maahi-instagram-worker",
-      accept: "application/vnd.github+json",
+    headers: { authorization: `Bearer ${accessToken}` },
+    cf: {
+      cacheTtl: 300,
+      cacheEverything: true,
+      image: { format: "jpeg", quality: 100 },
     },
-    cf: { cacheTtl: 60, cacheEverything: true },
   });
-  if (!r.ok) throw new Error(`GitHub ${path}: ${r.status} ${await r.text()}`);
-  return r;
-}
-
-async function listQueue() {
-  const r = await gh("queue");
-  const items = await r.json();
-  const captions = new Map();
-  const images = new Set();
-  for (const item of items) {
-    if (item.type !== "file") continue;
-    if (item.name === "test-trigger.txt") continue;
-    if (item.name.endsWith(".txt")) captions.set(item.name.slice(0, -4), item.download_url);
-    if (item.name.endsWith(".jpg.b64")) images.add(item.name.slice(0, -8));
-    else if (item.name.endsWith(".png")) images.add(item.name.slice(0, -4));
-    else if (item.name.endsWith(".jpg")) images.add(item.name.slice(0, -4));
-    else if (item.name.endsWith(".jpeg")) images.add(item.name.slice(0, -5));
-  }
-  return [...captions.entries()]
-    .filter(([stem]) => images.has(stem))
-    .map(([stem, captionUrl]) => ({ stem, captionUrl }))
-    .sort((a, b) => a.stem.localeCompare(b.stem));
-}
-
-async function getCaption(item) {
-  const r = await fetch(item.captionUrl, { cf: { cacheTtl: 60 } });
-  if (!r.ok) throw new Error(`Caption ${item.stem}: ${r.status}`);
-  return (await r.text()).trim();
-}
-
-async function getImageResponse(stem) {
-  // Keep PNG/JPG originals in the repo as masters. Instagram photo publishing
-  // expects a JPEG-compatible delivery URL, so transcode only at delivery time
-  // and use maximum JPEG quality to minimize generation loss.
-  for (const ext of ["png", "jpg", "jpeg"]) {
-    const rawUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.${ext}`;
-    const r = await fetch(rawUrl, {
-      cf: {
-        cacheTtl: 300,
-        cacheEverything: true,
-        image: { format: "jpeg", quality: 100 },
-      },
-    });
-    if (r.ok) {
-      return new Response(r.body, {
-        status: 200,
-        headers: {
-          "content-type": "image/jpeg",
-          "cache-control": "public, max-age=300",
-        },
-      });
-    }
-  }
-
-  const legacyUrl = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/queue/${encodeURIComponent(stem)}.jpg.b64`;
-  const r = await fetch(legacyUrl, { cf: { cacheTtl: 300, cacheEverything: true } });
-  if (!r.ok) throw new Error(`Image ${stem}: ${r.status}`);
-  const encoded = (await r.text()).replace(/\\s/g, "");
-  const raw = atob(encoded);
-  const bytes = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  return new Response(bytes, {
+  if (!r.ok) throw new Error(`Drive image ${fileId}: ${r.status} ${await r.text()}`);
+  return new Response(r.body, {
+    status: 200,
     headers: {
       "content-type": "image/jpeg",
       "cache-control": "public, max-age=300",
@@ -134,10 +90,7 @@ async function alreadyOnInstagram(env, caption) {
   const r = await fetch(u, {
     headers: { authorization: `Bearer ${env.INSTAGRAM_ACCESS}` },
   });
-  if (!r.ok) {
-    const body = await r.text();
-    throw new Error(`Instagram media lookup ${r.status}: ${body}`);
-  }
+  if (!r.ok) throw new Error(`Instagram media lookup ${r.status}: ${await r.text()}`);
   const data = await r.json();
   const found = (data.data || []).find((x) => (x.caption || "").trim() === caption.trim());
   return found?.id || null;
@@ -159,10 +112,10 @@ async function igPost(url, body, env) {
 async function publishStem(stem, env) {
   let phase = "start";
   try {
-    phase = "list-queue";
-    const queue = await listQueue();
+    phase = "list-drive-queue";
+    const { accessToken, queue } = await getDriveQueue(env);
     const item = queue.find((x) => x.stem === stem || x.stem.startsWith(`${stem}_`));
-    if (!item) throw new Error(`Queue item not found: ${stem}`);
+    if (!item) throw new Error(`Drive queue item not found: ${stem}`);
     stem = item.stem;
 
     phase = "check-posted";
@@ -170,7 +123,8 @@ async function publishStem(stem, env) {
     if (done) return { ok: true, skipped: "already-marked", stem, media_id: done };
 
     phase = "caption";
-    const caption = await getCaption(item);
+    const caption = await getCaption(item, accessToken);
+    if (!caption) throw new Error(`Caption is empty: ${item.captionName}`);
 
     phase = "instagram-duplicate-check";
     const existing = await alreadyOnInstagram(env, caption);
@@ -188,7 +142,7 @@ async function publishStem(stem, env) {
 
     try {
       phase = "create-container";
-      const imageUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/image/${encodeURIComponent(stem)}`;
+      const imageUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/drive-image/${encodeURIComponent(item.imageId)}`;
       const container = await igPost(`${GRAPH_BASE}/${env.IG_USER_ID}/media`, {
         image_url: imageUrl,
         caption,
@@ -204,7 +158,9 @@ async function publishStem(stem, env) {
         try { data = JSON.parse(text); } catch { data = {}; }
         if (!r.ok) throw new Error(`Instagram processing lookup ${r.status}: ${text}`);
         if (data.status_code === "FINISHED") break;
-        if (["ERROR", "EXPIRED"].includes(data.status_code)) throw new Error(`Instagram processing ${data.status_code}: ${text}`);
+        if (["ERROR", "EXPIRED"].includes(data.status_code)) {
+          throw new Error(`Instagram processing ${data.status_code}: ${text}`);
+        }
         if (i === 17) throw new Error(`Instagram processing timed out: ${text}`);
         await new Promise((resolve) => setTimeout(resolve, 10000));
       }
@@ -238,7 +194,6 @@ async function ensureDailyPlan(env) {
   const existing = await env.MAAHI_STATE.get(key, "json");
   if (existing) return existing;
 
-  // Natural posting cadence: 20% no post, 60% one post, 20% two posts.
   const roll = randInt(1, 100);
   const count = roll <= 20 ? 0 : roll <= 80 ? 1 : 2;
   const windows = [
@@ -248,8 +203,7 @@ async function ensureDailyPlan(env) {
   const slots = [];
   for (let i = 0; i < count; i++) {
     const [start, end] = windows[i];
-    const pick = randInt(minutesOfDay(start), minutesOfDay(end));
-    slots.push({ minute: pick, done: false, post_id: null });
+    slots.push({ minute: randInt(minutesOfDay(start), minutesOfDay(end)), done: false, post_id: null });
   }
   const plan = { date: now.date, slots };
   await env.MAAHI_STATE.put(key, JSON.stringify(plan), { expirationTtl: 172800 });
@@ -261,7 +215,7 @@ async function scheduledRun(env) {
   const now = pacificParts();
   const plan = await ensureDailyPlan(env);
   const currentMinute = minutesOfDay(now.time);
-  const queue = await listQueue();
+  const { queue } = await getDriveQueue(env);
   const available = [];
   for (const item of queue) {
     if (!(await env.MAAHI_STATE.get(`posted:${item.stem}`))) available.push(item.stem);
@@ -270,7 +224,7 @@ async function scheduledRun(env) {
   for (let i = 0; i < plan.slots.length; i++) {
     const slot = plan.slots[i];
     if (slot.done || currentMinute < slot.minute || available.length === 0) continue;
-    const stem = available[0];
+    const stem = available[randInt(0, available.length - 1)];
     const result = await publishStem(stem, env);
     if (result.ok) {
       slot.done = true;
@@ -280,7 +234,8 @@ async function scheduledRun(env) {
     await recordEvent(env, "last_run", { phase: "scheduled-finish", result });
     return result;
   }
-  const result = { ok: true, skipped: "nothing-due" };
+
+  const result = { ok: true, skipped: "nothing-due", available: available.length };
   await recordEvent(env, "last_run", { phase: "scheduled-finish", result });
   return result;
 }
@@ -301,42 +256,39 @@ export default {
 
   async fetch(request, env) {
     const url = new URL(request.url);
+
     if (url.pathname === "/test-drive") {
-  if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
-    return json({ error: "unauthorized" }, 401);
-  }
-
-  try {
-    const accessToken = await getGoogleDriveAccessToken(env);
-    const files = await listGoogleDriveFilesWithToken(env, accessToken);
-
-    return json({
-      ok: true,
-      folder_id: env.GOOGLE_DRIVE_FOLDER_ID,
-      file_count: files.length,
-      files,
-    });
-  } catch (e) {
-    return json(
-      {
-        ok: false,
-        error: String(e?.message || e),
-      },
-      500
-    );
-  }
-}
-    if (url.pathname.startsWith("/image/")) {
-      const stem = decodeURIComponent(url.pathname.slice(7));
+      if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+        return json({ error: "unauthorized" }, 401);
+      }
       try {
-        return await getImageResponse(stem);
+        const accessToken = await getGoogleDriveAccessToken(env);
+        const rootFiles = await listGoogleDriveFilesWithToken(env, accessToken);
+        const queue = await buildDriveQueueWithToken(env, accessToken);
+        return json({
+          ok: true,
+          folder_id: env.GOOGLE_DRIVE_FOLDER_ID,
+          root_file_count: rootFiles.length,
+          root_files: rootFiles,
+          matched_queue_count: queue.length,
+          queue,
+        });
+      } catch (e) {
+        return json({ ok: false, error: String(e?.message || e) }, 500);
+      }
+    }
+
+    if (url.pathname.startsWith("/drive-image/")) {
+      const fileId = decodeURIComponent(url.pathname.slice("/drive-image/".length));
+      try {
+        return await getDriveImageResponse(fileId, env);
       } catch (e) {
         return new Response("not found", { status: 404 });
       }
     }
 
     if (url.pathname === "/health") {
-      return json({ ok: true, service: "maahi-instagram-worker", time: new Date().toISOString() });
+      return json({ ok: true, service: "maahi-instagram-worker", source: "google-drive", time: new Date().toISOString() });
     }
 
     if (url.pathname === "/publish") {
@@ -353,6 +305,10 @@ export default {
       catch (e) { return json({ error: String(e?.message || e) }, 500); }
     }
 
-    return json({ ok: true, endpoints: [["/health", "/test-drive", "/image/:stem", "/publish", "/run"]] });
+    return json({
+      ok: true,
+      source: "google-drive",
+      endpoints: ["/health", "/test-drive", "/drive-image/:fileId", "/publish", "/run"],
+    });
   },
 };
