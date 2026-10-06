@@ -6,12 +6,19 @@ import {
 } from "./google-drive.js";
 
 const GRAPH_BASE = "https://graph.instagram.com/v25.0";
+const ONE_TIME_PUBLISH_HASH = "eab03f3addeee8c604fd497a4a651f7f8c09763e690d9e6c7189eedd6a028b5f";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
+}
+
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function pacificParts(date = new Date()) {
@@ -256,6 +263,13 @@ export default {
 
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/one-time-publish-48") {
+      const token = url.searchParams.get("token") || "";
+      if (await sha256Hex(token) !== ONE_TIME_PUBLISH_HASH) return json({ error: "unauthorized" }, 401);
+      try { return json(await publishStem("48_cozy_chai_saree_by_bay", env)); }
+      catch (e) { return json({ error: String(e?.message || e) }, 500); }
+    }
 
     if (url.pathname === "/test-drive") {
       if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
