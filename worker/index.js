@@ -1,3 +1,5 @@
+import { getGoogleDriveAccessToken } from "./google-auth.js";
+import { listGoogleDriveFilesWithToken } from "./google-drive.js";
 const GITHUB_OWNER = "maahisen1996";
 const GITHUB_REPO = "maahi";
 const GITHUB_BRANCH = "main";
@@ -299,7 +301,31 @@ export default {
 
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/test-drive") {
+  if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+    return json({ error: "unauthorized" }, 401);
+  }
 
+  try {
+    const accessToken = await getGoogleDriveAccessToken(env);
+    const files = await listGoogleDriveFilesWithToken(env, accessToken);
+
+    return json({
+      ok: true,
+      folder_id: env.GOOGLE_DRIVE_FOLDER_ID,
+      file_count: files.length,
+      files,
+    });
+  } catch (e) {
+    return json(
+      {
+        ok: false,
+        error: String(e?.message || e),
+      },
+      500
+    );
+  }
+}
     if (url.pathname.startsWith("/image/")) {
       const stem = decodeURIComponent(url.pathname.slice(7));
       try {
@@ -327,6 +353,6 @@ export default {
       catch (e) { return json({ error: String(e?.message || e) }, 500); }
     }
 
-    return json({ ok: true, endpoints: ["/health", "/image/:stem", "/publish", "/run"] });
+    return json({ ok: true, endpoints: [["/health", "/test-drive", "/image/:stem", "/publish", "/run"]] });
   },
 };
